@@ -5,46 +5,115 @@ on:
     paths:
       - '**/*'
   schedule:
-    - cron: '0 12 * * *'   # runs daily at 12:00 UTC
+    # Run daily at 9:00 AM America/New_York (13:00 UTC during DST).
+    - cron: '0 13 * * *'
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      TZ: America/New_York
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compute totals
+      - name: Compute totals (ET-based)
         id: calc
         shell: bash
         run: |
+          set -euo pipefail
           GOAL=150
+
           # Count top-level dirs whose names start with a digit
           SOLVED=$(find . -maxdepth 1 -type d -regex './[0-9].*' | wc -l | xargs)
-          PCT=$(( 100*SOLVED/GOAL ))
-          echo "goal=$GOAL" >> $GITHUB_OUTPUT
-          echo "solved=$SOLVED" >> $GITHUB_OUTPUT
-          echo "pct=$PCT" >> $GITHUB_OUTPUT
-          echo "date=$(date -u +"%b %d, %Y")" >> $GITHUB_OUTPUT
+
+          # Dates in America/New_York
+          TODAY_ET=$(date +"%F")                      # 2025-10-14
+          TODAY_HUMAN=$(date +"%b %d, %Y")           # Oct 14, 2025
+          YESTERDAY_ET=$(date -d "$TODAY_ET -1 day" +"%F")
+
+          # Load previous state
+          STATE_FILE=".progress.json"
+          if [[ -f "$STATE_FILE" ]]; then
+            LAST_DATE=$(jq -r '.last_date // ""' "$STATE_FILE")
+            LAST_SOLVED=$(jq -r '.last_solved // 0' "$STATE_FILE")
+            STREAK=$(jq -r '.streak // 0' "$STATE_FILE")
+          else
+            LAST_DATE=""
+            LAST_SOLVED=0
+            STREAK=0
+          fi
+
+          # Decide new streak only when SOLVED increases
+          if (( SOLVED > LAST_SOLVED )); then
+            if [[ "$LAST_DATE" == "$TODAY_ET" ]]; then
+              : # same day more solves -> keep streak as-is
+            elif [[ "$LAST_DATE" == "$YESTERDAY_ET" ]]; then
+              STREAK=$(( STREAK + 1 ))
+            else
+              STREAK=1
+            fi
+            LAST_DATE="$TODAY_ET"
+            LAST_SOLVED="$SOLVED"
+          fi
+
+          # Guard against zero/empty values
+          if [[ -z "$LAST_DATE" ]]; then
+            LAST_DATE="$TODAY_ET"
+          fi
+          if (( STREAK <= 0 )); then
+            STREAK=1
+          fi
+
+          # Percent complete (floor)
+          PCT=$(( 100 * SOLVED / GOAL ))
+
+          # Save state back to file
+          jq -n --arg d "$LAST_DATE" --argjson s "$LAST_SOLVED" --argjson k "$STREAK" \
+            '{last_date:$d, last_solved:$s, streak:$k}' > "$STATE_FILE"
+
+          echo "goal=$GOAL" >> "$GITHUB_OUTPUT"
+          echo "solved=$SOLVED" >> "$GITHUB_OUTPUT"
+          echo "pct=$PCT" >> "$GITHUB_OUTPUT"
+          echo "today_human=$TODAY_HUMAN" >> "$GITHUB_OUTPUT"
+          echo "streak=$STREAK" >> "$GITHUB_OUTPUT"
 
       - name: Rewrite README block
         shell: bash
         run: |
-          awk -v solved="${{ steps.calc.outputs.solved }}" \
-              -v goal="${{ steps.calc.outputs.goal }}" \
-              -v pct="${{ steps.calc.outputs.pct }}" \
-              -v today="${{ steps.calc.outputs.date }}" '
+          set -euo pipefail
+          solved="${{ steps.calc.outputs.solved }}"
+          goal="${{ steps.calc.outputs.goal }}"
+          pct="${{ steps.calc.outputs.pct }}"
+          today="${{ steps.calc.outputs.today_human }}"
+          streak="${{ steps.calc.outputs.streak }}"
+
+          # Badge label for streak
+          if [[ "$streak" -eq 1 ]]; then
+            STREAK_BADGE="1_day"
+            STREAK_TEXT="1-day streak"
+          else
+            STREAK_BADGE="${streak}_days"
+            STREAK_TEXT="${streak}-day streak"
+          fi
+
+          awk -v solved="$solved" \
+              -v goal="$goal" \
+              -v pct="$pct" \
+              -v today="$today" \
+              -v sbadge="$STREAK_BADGE" \
+              -v stext="$STREAK_TEXT" '
             BEGIN { inside=0 }
             /<!-- PROGRESS_START -->/ {
               print; inside=1;
               print "<div align=\"center\">\n"
               print "  <img src=\"https://img.shields.io/badge/Solved-" solved "-22c55e?style=for-the-badge\" alt=\"Solved\">"
-              print "  <img src=\"https://img.shields.io/badge/Streak-1_day-3b82f6?style=for-the-badge\" alt=\"Streak\">"
+              print "  <img src=\"https://img.shields.io/badge/Streak-" sbadge "-3b82f6?style=for-the-badge\" alt=\"Streak\">"
               print "  <img src=\"https://img.shields.io/badge/Goal-" goal "_problems-8b5cf6?style=for-the-badge\" alt=\"Goal\">\n"
               print "  <div style=\"margin-top:14px;background:#1f2937;border-radius:10px;width:520px;height:16px;display:inline-block;\">"
               print "    <div style=\"background:linear-gradient(90deg,#22c55e,#3b82f6);height:16px;width:" pct "%;border-radius:10px;\"></div>"
               print "  </div>\n"
-              print "  <div style=\"margin-top:8px;font-weight:600;\">" solved " / " goal " problems • 1-day streak</div>"
-              print "  <div style=\"margin-top:4px;font-size:12px;color:#9ca3af;\">Updated: " today "</div>\n"
+              print "  <div style=\"margin-top:8px;font-weight:600;\">" solved " / " goal " problems • " stext "</div>"
+              print "  <div style=\"margin-top:4px;font-size:12px;color:#9ca3af;\">Updated: " today " (America/New_York)</div>\n"
               print "</div>";
               next
             }
@@ -54,10 +123,11 @@ jobs:
 
       - name: Commit changes
         run: |
+          set -euo pipefail
           if ! git diff --quiet; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add README.md
-            git commit -m "chore: update progress bar to ${{ steps.calc.outputs.pct }}%"
+            git add README.md .progress.json
+            git commit -m "chore: update progress (solved=${{ steps.calc.outputs.solved }}, streak=${{ steps.calc.outputs.streak }}, pct=${{ steps.calc.outputs.pct }}%)"
             git push
           fi
