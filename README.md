@@ -14,7 +14,7 @@ I post one problem a day. Each folder has code and a quick note. Let's get it!
   </div>
 
   <div style="margin-top:8px;font-weight:600;">9 / 150 problems • 1-day streak</div>
-  <div style="margin-top:4px;font-size:12px;color:#9ca3af;">Updated: Jan 01, 2026 (America/New_York)</div>
+  <div style="margin-top:4px;font-size:12px;color:#9ca3af;">Updated: Jan 02, 2026 (America/New_York)</div>
 
 </div>
 <!-- PROGRESS_END -->
